@@ -104,7 +104,7 @@ Important notes:
 			csv = f
 		}
 
-		f, err := tea.LogToFile(filepath.Join(os.TempDir(), "org-stats.log"), "org-stats")
+		f, err := tea.LogToFile("org-stats.log", "org-stats")
 		if err != nil {
 			return err
 		}

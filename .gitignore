@@ -6,3 +6,4 @@ snap.login
 completions/
 *.log
 manpages
+*.csv

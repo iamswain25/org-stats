@@ -14,7 +14,9 @@ import (
 
 // Stat represents an user adds, rms and commits count
 type Stat struct {
-	Additions, Deletions, Commits, Reviews int
+	Additions, Deletions int
+	Commits, Reviews int
+	PullRequests int
 }
 
 // Stats contains the user->Stat mapping
@@ -67,6 +69,18 @@ func Gather(
 		return Stats{}, err
 	}
 
+	if err := gatherPullRequestStats(
+		ctx,
+		client,
+		org,
+		userBlacklist,
+		repoBlacklist,
+		&allStats,
+		since,
+	); err != nil {
+		return Stats{}, err
+	}
+
 	log.Println("total authors stats:", len(allStats.data))
 
 	if !includeReviewStats {
@@ -100,11 +114,13 @@ func gatherReviewStats(
 	allStats *Stats,
 	since time.Time,
 ) error {
-	ts := since.Format("2006-01-02")
-	// review:approved, review:changes_requested
-	reviewed, err := search(ctx, client, fmt.Sprintf("user:%s is:pr reviewed-by:%s created:>%s", org, user, ts))
+	query := fmt.Sprintf("user:%s is:pr reviewed-by:%s", org, user)
+	if !since.IsZero() {
+		query += fmt.Sprintf(" created:>%s", since.Format("2006-01-02"))
+	}
+	reviewed, err := search(ctx, client, query)
 	if err != nil {
-		log.Println("failed to gather review stats for user: ", user, "error: ", err)
+		log.Printf("[ERROR] Failed to gather review stats for user %s: %v", user, err)
 		return err
 	}
 	allStats.addReviewStats(user, reviewed)
@@ -149,6 +165,7 @@ func gatherLineStats(
 ) error {
 	allRepos, err := repos(ctx, client, org)
 	if err != nil {
+		log.Printf("[ERROR] Failed to get repos: %v", err)
 		return err
 	}
 
@@ -163,6 +180,7 @@ func gatherLineStats(
 		}
 		stats, serr := getStats(ctx, client, org, *repo.Name)
 		if serr != nil {
+			log.Printf("[ERROR] Failed to get stats for repo %s: %v", *repo.Name, serr)
 			return serr
 		}
 		for _, cs := range stats {
@@ -281,4 +299,97 @@ func handleSecondaryRateLimit(err *githuberrors.SecondaryRateLimitError) {
 	}
 	log.Printf("hit secondary rate limit, waiting %v", s)
 	time.Sleep(s)
+}
+
+func gatherPullRequestStats(
+	ctx context.Context,
+	client *github.Client,
+	org string,
+	userBlacklist, repoBlacklist []string,
+	allStats *Stats,
+	since time.Time,
+) error {
+	query := fmt.Sprintf("org:%s is:pr", org)
+	if !since.IsZero() {
+		query += fmt.Sprintf(" created:>%s", since.Format("2006-01-02"))
+	}
+	
+	opt := &github.SearchOptions{
+		ListOptions: github.ListOptions{PerPage: 100},
+	}
+	
+	for {
+		result, resp, err := client.Search.Issues(ctx, query, opt)
+		if rateErr, ok := err.(*github.RateLimitError); ok {
+			handleRateLimit(rateErr)
+			continue
+		}
+		if isSecondRateErr, secondRateErr := githuberrors.IsSecondaryRateLimitError(resp); isSecondRateErr {
+			handleSecondaryRateLimit(secondRateErr)
+			continue
+		}
+		if err != nil {
+			log.Printf("[ERROR] Failed to search PRs: %v", err)
+			return fmt.Errorf("failed to search PRs: %w", err)
+		}
+
+		for _, pr := range result.Issues {
+			if isBlacklisted(userBlacklist, pr.GetUser().GetLogin()) {
+				log.Println("ignoring blacklisted PR author:", pr.GetUser().GetLogin())
+				continue
+			}
+
+			// Get PR details to access the changed files
+			prDetails, _, err := client.PullRequests.Get(ctx, org, getRepoFromPRURL(pr.GetHTMLURL()), pr.GetNumber())
+			if err != nil {
+				log.Printf("[ERROR] Failed to get PR details for org=%s repo=%s pr=%d: %v", 
+					org, 
+					getRepoFromPRURL(pr.GetHTMLURL()), 
+					pr.GetNumber(), 
+					err,
+				)
+				continue
+			}
+
+			if isBlacklisted(repoBlacklist, getRepoFromPRURL(pr.GetHTMLURL())) {
+				log.Printf("[INFO] Ignoring blacklisted repo: org=%s repo=%s", 
+					org, 
+					getRepoFromPRURL(pr.GetHTMLURL()),
+				)
+				continue
+			}
+
+			log.Printf("[INFO] Recording PR stats for org=%s repo=%s author=%s pr=%d", 
+				org,
+				getRepoFromPRURL(pr.GetHTMLURL()),
+				pr.GetUser().GetLogin(), 
+				pr.GetNumber(),
+			)
+			allStats.addPRStats(pr.GetUser().GetLogin(), prDetails.GetAdditions(), prDetails.GetDeletions(), 1)
+		}
+
+		if resp.NextPage == 0 {
+			break
+		}
+		opt.Page = resp.NextPage
+	}
+	
+	return nil
+}
+
+func getRepoFromPRURL(url string) string {
+	parts := strings.Split(url, "/")
+	if len(parts) >= 5 {
+		return parts[4]
+	}
+	return ""
+}
+
+func (s *Stats) addPRStats(user string, additions, deletions, commits int) {
+	stat := s.data[user]
+	stat.Additions += additions
+	stat.Deletions += deletions
+	stat.Commits += commits
+	stat.PullRequests += 1
+	s.data[user] = stat
 }

@@ -14,7 +14,7 @@ func Write(w io.Writer, s orgstats.Stats, includeReviews bool) error {
 	cw := csv.NewWriter(w)
 	defer cw.Flush()
 
-	headers := []string{"login", "commits", "lines-added", "lines-removed"}
+	headers := []string{"login", "commits", "lines-added", "lines-removed", "pull-requests"}
 	if includeReviews {
 		headers = append(headers, "reviews")
 	}
@@ -32,6 +32,7 @@ func Write(w io.Writer, s orgstats.Stats, includeReviews bool) error {
 			strconv.Itoa(stat.Commits),
 			strconv.Itoa(stat.Additions),
 			strconv.Itoa(stat.Deletions),
+			strconv.Itoa(stat.PullRequests),
 		}
 		if includeReviews {
 			record = append(record, strconv.Itoa(stat.Reviews))
